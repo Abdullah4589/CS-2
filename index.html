@@ -1490,7 +1490,7 @@ const Bots = (() => {
 
   B.init = bot => {
     bot.brain = { path: null, pi: 0, goalKey: '', goal: null, target: null, reactT: 0, errY: 0, errP: 0, aimHead: false,
-      lastSeen: null, lastSeenT: -99, heard: null, thinkT: 0, visT: 0, stuckT: 0, lastPos: new THREE.Vector3(),
+      lastSeen: null, lastSeenT: -99, heard: null, visT: 0, stuckT: 0, lastPos: new THREE.Vector3(),
       strafe: 1, strafeT: 0, burst: 0, pauseT: 0, wp: [], wpi: 0, hold: null, delay: 0, role: '', utilDone: false, nadeCd: 0, trigger: false };
   };
 
@@ -1669,12 +1669,23 @@ const Bots = (() => {
 
   /* ------------------------------ Update ------------------------------- */
   B.update = (bot, dt) => {
-    const br = bot.brain, d = diff();
     bot.walking = false; bot.crouching = false;
-    let wish = null, jump = false;
     if (G.phase === 'freeze' || G.phase === 'over') { bot.move(dt, 0, 0, false); return; }
+    perceive(bot, dt);
+    const gun = bot.gun();
+    manageWeapon(bot, gun);
+    const br = bot.brain;
+    if (br.visible && br.target && br.target.alive) { fight(bot, dt, gun); return; }
+    br.burst = 0;
+    if (gun.scope && !br.visible) gun.scope = 0;
+    br.nadeCd -= dt;
+    if (bot.nades.length && br.nadeCd <= 0) tryUtility(bot);
+    travel(bot, dt);
+  };
 
-    // --- perception (throttled) ---
+  /** Throttled vision scan: marks enemies spotted and picks the closest engageable target. */
+  function perceive(bot, dt) {
+    const br = bot.brain;
     br.visT -= dt;
     if (br.visT <= 0) {
       br.visT = 0.12;
@@ -1688,120 +1699,136 @@ const Bots = (() => {
         const dd = bot.pos.distanceTo(e.pos) - (e === br.target ? 5 : 0);
         if (dd < bestD) { bestD = dd; best = e; }
       }
-      if (best && best !== br.target) {
-        const wasTracking = br.target && G.time - br.lastSeenT < 1;
-        br.target = best;
-        br.reactT = wasTracking ? d.react * 0.4 : d.react * rand(0.8, 1.35) + (bot.flashT > 0 ? 0.3 : 0);
-        br.errY = (Math.random() - 0.5) * 2 * d.aimErr * DEG * 2.2;
-        br.errP = (Math.random() - 0.5) * 2 * d.aimErr * DEG * 1.4 + d.aimErr * DEG * 0.8;
-        br.aimHead = Math.random() < d.hsChance;
-        br.burst = 0;
-      }
+      if (best && best !== br.target) acquireTarget(bot, best);
       br.visible = !!best;
       if (!best && br.target && !br.target.alive) br.target = null;
       if (best) { br.lastSeen = best.pos.clone(); br.lastSeenT = G.time; if (bot.team === 'CT') { const s = siteNear(best.pos); if (s) G.intel[s] = G.time; } }
       else if (br.target && G.time - br.lastSeenT > 3) br.target = null;
     }
     br.reactT -= dt;
-    const gun = bot.gun();
-
-    // --- weapon management ---
-    if (bot.cur === 4 || bot.cur === 5 || bot.cur === 3) { if (!bot.switchTo(bot.slots[1] ? 1 : 2)) {} }
+  }
+  /** New target: roll reaction time, initial aim error and head/body preference from difficulty. */
+  function acquireTarget(bot, target) {
+    const br = bot.brain, d = diff();
+    const wasTracking = br.target && G.time - br.lastSeenT < 1;
+    br.target = target;
+    br.reactT = wasTracking ? d.react * 0.4 : d.react * rand(0.8, 1.35) + (bot.flashT > 0 ? 0.3 : 0);
+    br.errY = (Math.random() - 0.5) * 2 * d.aimErr * DEG * 2.2;
+    br.errP = (Math.random() - 0.5) * 2 * d.aimErr * DEG * 1.4 + d.aimErr * DEG * 0.8;
+    br.aimHead = Math.random() < d.hsChance;
+    br.burst = 0;
+  }
+  /** Keep a gun out, reload when safe, prefer the primary, fall back to the pistol when dry. */
+  function manageWeapon(bot, gun) {
+    const br = bot.brain;
+    if (bot.cur === 4 || bot.cur === 5 || bot.cur === 3) bot.switchTo(bot.slots[1] ? 1 : 2);
     if (!br.visible && gun.def.mag && gun.mag < gun.def.mag * 0.35 && gun.reserve > 0) startReload(bot);
     if (bot.slots[1] && bot.cur === 2 && !br.visible) bot.switchTo(1);
     if (gun.def.mag && gun.mag === 0 && gun.reserve === 0 && bot.cur === 1) bot.switchTo(2);
+  }
 
-    // --- combat ---
-    if (br.visible && br.target && br.target.alive) {
-      const t = br.target;
-      bot.eye(eyeA);
-      const aimY = t.pos.y + (br.aimHead ? t.eyeH() + 0.02 : t.eyeH() * 0.72);
-      const a = anglesTo(eyeA.x, eyeA.y, eyeA.z, t.pos.x, aimY, t.pos.z);
-      br.errY *= Math.exp(-dt * 1.6); br.errP *= Math.exp(-dt * 1.6);
-      const [px, py] = gun.punch();
-      const wantYaw = a.yaw + br.errY + px * DEG * d.spray;
-      const wantPitch = a.pitch + br.errP - py * DEG * d.spray;
-      const k = Math.min(1, dt * d.turn * (bot.flashT > 0 ? 0.3 : 1));
-      bot.yaw = wrapAngle(bot.yaw + wrapAngle(wantYaw - bot.yaw) * k);
-      bot.pitch += (wantPitch - bot.pitch) * k;
-      const dist = bot.pos.distanceTo(t.pos);
-      const err = Math.hypot(wrapAngle(wantYaw - bot.yaw), wantPitch - bot.pitch);
-      const tol = Math.atan2(0.35, dist) + 0.01;
-      // AWP: scope up when target is far
-      if (gun.def.scope) gun.scope = dist > 8 ? 1 : 0;
-      // movement while fighting: stop at range for accuracy, strafe up close / with pistols
-      const closeFight = dist < 9 || gun.def.type === 'pistol' || gun.def.type === 'smg';
-      // alternate strafe / counter-strafe-and-shoot phases
-      br.strafeT -= dt;
-      if (br.strafeT <= 0) {
-        br.strafing = !br.strafing;
-        if (br.strafing) br.strafe = -br.strafe;
-        br.strafeT = br.strafing ? rand(0.3, 0.6) : rand(0.3, 0.6);
-      }
-      if (closeFight && br.strafing) wish = { x: Math.cos(bot.yaw) * br.strafe, z: -Math.sin(bot.yaw) * br.strafe };
-      if (!closeFight && G.difficulty === 'hard' && br.burst > 2 && gun.def.auto) bot.crouching = true;
-      if (br.pauseT > 0) br.pauseT -= dt;
-      const moving = Math.hypot(bot.vel.x, bot.vel.z) > bot.maxSpeed() * 0.4;
-      const burstLimit = dist > 25 ? 3 : dist > 14 ? Math.max(4, d.burst - 3) : d.burst + 10;
-      const blocked = teammateInLine(bot, dist);
-      // Hold fire and side-step to clear the line instead of shooting through a teammate
-      if (blocked) wish = { x: Math.cos(bot.yaw) * br.strafe, z: -Math.sin(bot.yaw) * br.strafe };
-      if (!blocked && br.reactT <= 0 && err < tol * (gun.def.type === 'sniper' ? 1 : 2.2) && br.pauseT <= 0 && !gun.reloading) {
-        const moveOk = gun.def.type === 'pistol' || gun.def.type === 'smg' || gun.def.type === 'shotgun';
-        if (!moving || moveOk) {
-          if (fireGun(bot, G.time)) {
-            br.burst++;
-            if (!gun.def.auto) br.pauseT = gun.def.type === 'sniper' ? 0.5 : rand(0.12, 0.3);
-            if (br.burst >= burstLimit) { br.burst = 0; br.pauseT = rand(0.25, 0.5); }
-          }
-        } else if (wish) { /* stop to shoot next tick */ wish = null; }
-      }
-      bot.move(dt, wish ? wish.x : 0, wish ? wish.z : 0, false);
-      return;
+  /* ------------------------------ Combat ------------------------------- */
+  function fight(bot, dt, gun) {
+    const { dist, err } = aimAtTarget(bot, dt, gun);
+    // AWP: scope up when target is far
+    if (gun.def.scope) gun.scope = dist > 8 ? 1 : 0;
+    let wish = combatMovement(bot, dt, gun, dist);
+    wish = tryShoot(bot, dt, gun, dist, err, wish);
+    bot.move(dt, wish ? wish.x : 0, wish ? wish.z : 0, false);
+  }
+  /** Turn toward the target with decaying aim error and partial recoil compensation. */
+  function aimAtTarget(bot, dt, gun) {
+    const br = bot.brain, d = diff(), t = br.target;
+    bot.eye(eyeA);
+    const aimY = t.pos.y + (br.aimHead ? t.eyeH() + 0.02 : t.eyeH() * 0.72);
+    const a = anglesTo(eyeA.x, eyeA.y, eyeA.z, t.pos.x, aimY, t.pos.z);
+    br.errY *= Math.exp(-dt * 1.6); br.errP *= Math.exp(-dt * 1.6);
+    const [px, py] = gun.punch();
+    const wantYaw = a.yaw + br.errY + px * DEG * d.spray;
+    const wantPitch = a.pitch + br.errP - py * DEG * d.spray;
+    const k = Math.min(1, dt * d.turn * (bot.flashT > 0 ? 0.3 : 1));
+    bot.yaw = wrapAngle(bot.yaw + wrapAngle(wantYaw - bot.yaw) * k);
+    bot.pitch += (wantPitch - bot.pitch) * k;
+    return { dist: bot.pos.distanceTo(t.pos), err: Math.hypot(wrapAngle(wantYaw - bot.yaw), wantPitch - bot.pitch) };
+  }
+  /** Stop at range for accuracy; up close or with pistols/SMGs, alternate strafing and counter-strafing. */
+  function combatMovement(bot, dt, gun, dist) {
+    const br = bot.brain;
+    const closeFight = dist < 9 || gun.def.type === 'pistol' || gun.def.type === 'smg';
+    br.strafeT -= dt;
+    if (br.strafeT <= 0) {
+      br.strafing = !br.strafing;
+      if (br.strafing) br.strafe = -br.strafe;
+      br.strafeT = rand(0.3, 0.6);
     }
-    br.burst = 0;
-    if (gun.scope && !br.visible) gun.scope = 0;
+    if (!closeFight && G.difficulty === 'hard' && br.burst > 2 && gun.def.auto) bot.crouching = true;
+    return closeFight && br.strafing ? strafeDir(bot) : null;
+  }
+  const strafeDir = bot => ({ x: Math.cos(bot.yaw) * bot.brain.strafe, z: -Math.sin(bot.yaw) * bot.brain.strafe });
+  /** Fire in bursts when aimed and reacted; never through a teammate. Returns the (possibly changed) move wish. */
+  function tryShoot(bot, dt, gun, dist, err, wish) {
+    const br = bot.brain, d = diff();
+    if (br.pauseT > 0) br.pauseT -= dt;
+    // Hold fire and side-step to clear the line instead of shooting through a teammate
+    if (teammateInLine(bot, dist)) return strafeDir(bot);
+    const tol = Math.atan2(0.35, dist) + 0.01;
+    if (br.reactT > 0 || err >= tol * (gun.def.type === 'sniper' ? 1 : 2.2) || br.pauseT > 0 || gun.reloading) return wish;
+    const moving = Math.hypot(bot.vel.x, bot.vel.z) > bot.maxSpeed() * 0.4;
+    const moveOk = gun.def.type === 'pistol' || gun.def.type === 'smg' || gun.def.type === 'shotgun';
+    if (moving && !moveOk) return null; // stop to shoot next tick
+    if (fireGun(bot, G.time)) {
+      const burstLimit = dist > 25 ? 3 : dist > 14 ? Math.max(4, d.burst - 3) : d.burst + 10;
+      br.burst++;
+      if (!gun.def.auto) br.pauseT = gun.def.type === 'sniper' ? 0.5 : rand(0.12, 0.3);
+      if (br.burst >= burstLimit) { br.burst = 0; br.pauseT = rand(0.25, 0.5); }
+    }
+    return wish;
+  }
 
-    // --- utility usage ---
-    br.nadeCd -= dt;
-    if (bot.nades.length && br.nadeCd <= 0) tryUtility(bot);
-
-    // --- objectives & travel ---
-    br.thinkT -= dt;
+  /* ------------------------ Objectives & travel ------------------------ */
+  function travel(bot, dt) {
+    const br = bot.brain;
     if (G.time - G.liveStart < br.delay && bot.team === 'T') { idleLook(bot, dt, null); bot.move(dt, 0, 0, false); return; }
     const goal = decide(bot);
     setGoal(bot, goal.c, goal.r, goal.key);
     const pd = pathDir(bot);
-    const heardRecent = br.heard && G.time - br.heard.t < 4;
-    const lastSeenRecent = br.lastSeen && G.time - br.lastSeenT < 4;
-
-    if (pd) {
-      wish = pd;
-      // walk silently when close to enemies we heard
-      if (heardRecent && dist2D(bot.pos.x, bot.pos.z, br.heard.x, br.heard.z) < 18) bot.walking = true;
-      const lookAt = lastSeenRecent ? br.lastSeen : heardRecent ? br.heard : null;
-      if (lookAt) faceTowards(bot, lookAt.x, (lookAt.y || 1.4), lookAt.z, dt, 5);
-      else faceTowards(bot, bot.pos.x + pd.x * 5, bot.pos.y + bot.eyeH(), bot.pos.z + pd.z * 5, dt, 6);
-      // stuck detection
-      br.stuckT += dt;
-      if (br.stuckT > 0.8) {
-        if (br.lastPos.distanceTo(bot.pos) < 0.35) { jump = true; br.goalKey = ''; }
-        br.lastPos.copy(bot.pos); br.stuckT = 0;
-      }
-    } else {
-      // arrived: act on objective or hold an angle
-      if (goal.act === 'plant' && bot.hasBomb()) { Game.holdPlant(bot, dt); }
-      else if (goal.act === 'pickup') wish = dirTo(bot, G.bomb.pos);
-      else if (goal.act === 'defuse' && G.bomb.state === 'planted') {
-        if (bot.pos.distanceTo(G.bomb.pos) < 1.6) Game.holdDefuse(bot, dt);
-        else wish = dirTo(bot, G.bomb.pos);
-      }
-      const look = heardRecent ? br.heard : lastSeenRecent ? br.lastSeen : goal.look ? { x: World.cx(goal.look[0]), y: 1.5, z: World.cz(goal.look[1]) } : null;
-      idleLook(bot, dt, look);
-      if (!goal.act && heardRecent && bot.team === 'T' && G.bomb.state !== 'planted' && Math.random() < 0.002) br.goalKey = '';
+    if (pd) { const jump = followPath(bot, dt, pd); bot.move(dt, pd.x, pd.z, jump); return; }
+    const wish = actAtGoal(bot, dt, goal);
+    bot.move(dt, wish ? wish.x : 0, wish ? wish.z : 0, false);
+  }
+  const heardRecently = br => br.heard && G.time - br.heard.t < 4;
+  const seenRecently = br => br.lastSeen && G.time - br.lastSeenT < 4;
+  /** Face the threat (or the way we're going) while walking the path; jump and re-path if stuck. Returns jump. */
+  function followPath(bot, dt, pd) {
+    const br = bot.brain, heard = heardRecently(br), seen = seenRecently(br);
+    // walk silently when close to enemies we heard
+    if (heard && dist2D(bot.pos.x, bot.pos.z, br.heard.x, br.heard.z) < 18) bot.walking = true;
+    const lookAt = seen ? br.lastSeen : heard ? br.heard : null;
+    if (lookAt) faceTowards(bot, lookAt.x, (lookAt.y || 1.4), lookAt.z, dt, 5);
+    else faceTowards(bot, bot.pos.x + pd.x * 5, bot.pos.y + bot.eyeH(), bot.pos.z + pd.z * 5, dt, 6);
+    br.stuckT += dt;
+    if (br.stuckT <= 0.8) return false;
+    const stuck = br.lastPos.distanceTo(bot.pos) < 0.35;
+    if (stuck) br.goalKey = '';
+    br.lastPos.copy(bot.pos); br.stuckT = 0;
+    return stuck;
+  }
+  /** Arrived: plant / pick up / defuse, otherwise hold the goal's angle. Returns a move wish or null. */
+  function actAtGoal(bot, dt, goal) {
+    const br = bot.brain, heard = heardRecently(br), seen = seenRecently(br);
+    let wish = null;
+    if (goal.act === 'plant' && bot.hasBomb()) Game.holdPlant(bot, dt);
+    else if (goal.act === 'pickup') wish = dirTo(bot, G.bomb.pos);
+    else if (goal.act === 'defuse' && G.bomb.state === 'planted') {
+      if (bot.pos.distanceTo(G.bomb.pos) < 1.6) Game.holdDefuse(bot, dt);
+      else wish = dirTo(bot, G.bomb.pos);
     }
-    bot.move(dt, wish ? wish.x : 0, wish ? wish.z : 0, jump);
-  };
+    const look = heard ? br.heard : seen ? br.lastSeen : goal.look ? { x: World.cx(goal.look[0]), y: 1.5, z: World.cz(goal.look[1]) } : null;
+    idleLook(bot, dt, look);
+    // T bots occasionally re-plan toward noises instead of holding forever
+    if (!goal.act && heard && bot.team === 'T' && G.bomb.state !== 'planted' && Math.random() < 0.002) br.goalKey = '';
+    return wish;
+  }
 
   /** Would a shot along the bot's current aim hit a teammate before reaching `maxDist`? */
   function teammateInLine(bot, maxDist) {
