@@ -2,6 +2,7 @@
 /* ============================== AGENTS ============================= */
 /* One class for the human player and bots: movement, weapons, hitboxes, 3rd-person model. */
 const HITGROUP_MULT = { head: 4, chest: 1, stomach: 1.25, legs: 0.75 };
+const TEAM_BULLET_DAMAGE = 0.33; // ff_damage_reduction_bullets in CS2 competitive
 
 const ModelKit = (() => {
   const box = (w, h, d, oy = 0) => new THREE.BoxGeometry(w, h, d).translate(0, oy, 0);
@@ -315,7 +316,11 @@ function knifeAttack(a, now) {
 /** Apply damage with hitgroup multipliers and armor. `raw` flags bypass multipliers (fall, grenades). */
 function applyDamage(v, amount, group, attacker, def, point, raw, dir) {
   if (!v.alive || G.phase === 'over') return;
-  if (attacker && attacker !== v && attacker.team === v.team) return; // friendly fire disabled
+  if (attacker && attacker !== v && attacker.team === v.team) {
+    // Friendly fire: bullets and knives only, at CS2's competitive reduction. Utility never hurts teammates.
+    if (!def || def.type === 'grenade' || group === 'fire') return;
+    amount *= TEAM_BULLET_DAMAGE;
+  }
   let dmg = raw ? amount : amount * HITGROUP_MULT[group];
   const armored = v.armor > 0 && (group === 'head' ? v.helmet : (group !== 'legs' && group !== 'fall' && group !== 'fire'));
   if (armored && def) {

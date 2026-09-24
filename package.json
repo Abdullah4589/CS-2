@@ -1,0 +1,14 @@
+{
+  "name": "counter-strike-web-tactical",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Single-file browser tactical shooter built on Three.js",
+  "scripts": {
+    "build": "sh src/build.sh",
+    "pretest": "sh src/build.sh",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}

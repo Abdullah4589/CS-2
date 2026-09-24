@@ -232,6 +232,10 @@ const Engine = (() => {
     fpsAcc += dt; fpsN++;
     if (fpsAcc > 0.5) { $('fps').textContent = Math.round(fpsN / fpsAcc) + ' fps'; fpsAcc = 0; fpsN = 0; }
   }
+  /** Advance the simulation by `seconds` in fixed 60Hz steps (used by the e2e tests to fast-forward). */
+  E.simulate = seconds => {
+    for (let i = 0; i < Math.round(seconds * 60) && G.phase !== 'over'; i++) step(1 / 60);
+  };
   return E;
 })();
 
