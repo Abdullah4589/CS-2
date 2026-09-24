@@ -78,6 +78,7 @@ const Bots = (() => {
     }
   };
   B.onDamaged = (bot, attacker) => {
+    if (attacker.team === bot.team) return; // stray teammate shots aren't a threat to investigate
     const br = bot.brain;
     if (!br.visible) { br.heard = { x: attacker.pos.x, y: attacker.pos.y + 1.4, z: attacker.pos.z, t: G.time }; br.reactT = Math.max(br.reactT, 0.1); }
   };
@@ -263,7 +264,10 @@ const Bots = (() => {
       if (br.pauseT > 0) br.pauseT -= dt;
       const moving = Math.hypot(bot.vel.x, bot.vel.z) > bot.maxSpeed() * 0.4;
       const burstLimit = dist > 25 ? 3 : dist > 14 ? Math.max(4, d.burst - 3) : d.burst + 10;
-      if (br.reactT <= 0 && err < tol * (gun.def.type === 'sniper' ? 1 : 2.2) && br.pauseT <= 0 && !gun.reloading) {
+      const blocked = teammateInLine(bot, dist);
+      // Hold fire and side-step to clear the line instead of shooting through a teammate
+      if (blocked) wish = { x: Math.cos(bot.yaw) * br.strafe, z: -Math.sin(bot.yaw) * br.strafe };
+      if (!blocked && br.reactT <= 0 && err < tol * (gun.def.type === 'sniper' ? 1 : 2.2) && br.pauseT <= 0 && !gun.reloading) {
         const moveOk = gun.def.type === 'pistol' || gun.def.type === 'smg' || gun.def.type === 'shotgun';
         if (!moving || moveOk) {
           if (fireGun(bot, G.time)) {
@@ -320,6 +324,17 @@ const Bots = (() => {
     bot.move(dt, wish ? wish.x : 0, wish ? wish.z : 0, jump);
   };
 
+  /** Would a shot along the bot's current aim hit a teammate before reaching `maxDist`? */
+  function teammateInLine(bot, maxDist) {
+    const hx = -Math.sin(bot.yaw), hz = -Math.cos(bot.yaw); // horizontal aim direction
+    return G.agents.some(m => {
+      if (m === bot || !m.alive || m.team !== bot.team) return false;
+      const t = (m.pos.x - bot.pos.x) * hx + (m.pos.z - bot.pos.z) * hz; // distance along the aim line
+      if (t <= 0 || t >= maxDist) return false;
+      // 0.6m lateral margin covers the teammate's body width plus spray
+      return dist2D(m.pos.x, m.pos.z, bot.pos.x + hx * t, bot.pos.z + hz * t) < 0.6;
+    });
+  }
   function dirTo(bot, p) {
     const x = p.x - bot.pos.x, z = p.z - bot.pos.z, l = Math.hypot(x, z) || 1;
     return { x: x / l, z: z / l };

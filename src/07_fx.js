@@ -189,7 +189,7 @@ const Fires = (() => {
       if (f.tick <= 0) {
         f.tick = 0.25;
         for (const a of G.agents) if (a.alive && dist2D(a.pos.x, a.pos.z, f.pos.x, f.pos.z) < f.r && Math.abs(a.pos.y - f.pos.y) < 1.2)
-          applyDamage(a, 10, 'fire', f.owner && f.owner.team !== a.team ? f.owner : null, WEAPONS.molotov, null, true);
+          applyDamage(a, 10, 'fire', f.owner, WEAPONS.molotov, null, true);
       }
       if (f.t >= f.life) F.list.splice(i, 1);
     }

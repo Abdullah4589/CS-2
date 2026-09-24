@@ -10,6 +10,9 @@ const test = base.extend({
   game: async ({ page }, use) => {
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
+    // Headless Chrome may grant pointer lock and then drop it, which (correctly) pauses the game.
+    // Stub it so tests stay deterministic; pausing is covered explicitly below.
+    await page.addInitScript(() => { Element.prototype.requestPointerLock = () => Promise.resolve(); });
     await page.goto(GAME_URL);
     await expect(page.getByRole('button', { name: /play/i })).toBeVisible();
     await use(page);
@@ -191,6 +194,63 @@ test.describe('objectives', () => {
       return { round: G.round, total: G.score[0] + G.score[1] };
     });
     expect(result).toEqual({ round: 2, total: 1 });
+  });
+});
+
+test.describe('friendly fire', () => {
+  test('bullets hurt teammates at 33% damage', async ({ game: page }) => {
+    await startMatch(page);
+    await freezeBots(page);
+    const lost = await page.evaluate(() => {
+      const p = G.player, mate = G.agents.find(a => a.isBot && a.team === p.team);
+      p.pos.copy(World.spot(19, 28)); mate.pos.copy(World.spot(19, 26));
+      mate.armor = 0; mate.helmet = false; // pistol-round bots may have bought kevlar
+      p.vel.set(0, 0, 0); p.crouching = false;
+      p.eye(_o);
+      const a = anglesTo(_o.x, _o.y, _o.z, mate.pos.x, mate.pos.y + 1.2, mate.pos.z);
+      p.yaw = a.yaw; p.pitch = a.pitch;
+      p.gun().nextFire = 0; p.drawEnd = 0;
+      fireGun(p, G.time);
+      return 100 - mate.hp;
+    });
+    // USP-S chest hit is ~34 on an enemy; a teammate should take about a third of that
+    expect(lost).toBeGreaterThanOrEqual(8);
+    expect(lost).toBeLessThanOrEqual(15);
+  });
+
+  test('grenades do not hurt teammates but do hurt the thrower', async ({ game: page }) => {
+    await startMatch(page);
+    await freezeBots(page);
+    const hp = await page.evaluate(() => {
+      const p = G.player, mate = G.agents.find(a => a.isBot && a.team === p.team);
+      p.pos.copy(World.spot(19, 28)); mate.pos.copy(World.spot(20, 28));
+      p.nades = ['he']; p.pitch = -1.4; // throw at own feet
+      Grenades.throwFrom(p, 'he', 0.4);
+      Engine.simulate(2.5);
+      return { mate: mate.hp, self: p.hp };
+    });
+    expect(hp.mate).toBe(100);
+    expect(hp.self).toBeLessThan(100);
+  });
+
+  test('bots do not shoot through a teammate in their line of fire', async ({ game: page }) => {
+    await startMatch(page);
+    const r = await page.evaluate(() => {
+      const realUpdate = Bots.update;
+      G.paused = true; G.phaseT = 0;
+      const [shooter, mate] = G.agents.filter(a => a.isBot && a.team === G.player.team);
+      const enemy = G.agents.find(a => a.team !== G.player.team);
+      G.agents.forEach(a => { if (a !== shooter && a !== mate && a !== enemy) a.alive = false; });
+      Bots.update = (b, dt) => (b === shooter ? realUpdate(b, dt) : b.move(dt, 0, 0, false));
+      Engine.simulate(0.1);
+      shooter.pos.copy(World.spot(19, 28)); mate.pos.copy(World.spot(19, 25)); enemy.pos.copy(World.spot(19, 20));
+      shooter.yaw = 0; shooter.pitch = 0;
+      const t0 = G.time;
+      Engine.simulate(3);
+      return { mateHp: mate.hp, fired: shooter.gun().lastShot > t0 };
+    });
+    expect(r.mateHp).toBe(100);
+    expect(r.fired).toBe(true); // it side-stepped to a clear line and engaged
   });
 });
 
